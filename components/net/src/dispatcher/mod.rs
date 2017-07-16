@@ -24,7 +24,7 @@ use protobuf::parse_from_bytes;
 use zmq;
 
 use config::DispatcherCfg;
-use server::Envelope;
+use server::{Envelope, ZMQ_CONTEXT};
 
 /// Function signature for dispatch handlers.
 pub type MessageHandler<T> = Fn(&mut Envelope) -> Result<(), T>;
@@ -53,8 +53,6 @@ pub trait Dispatcher: Sized + Send {
 
     fn new(config: Arc<RwLock<Self::Config>>) -> Self;
 
-    fn context(&mut self) -> &mut zmq::Context;
-
     /// Callback to perform dispatcher initialization.
     ///
     /// The default implementation will take your initial state and convert it into the actual
@@ -71,7 +69,7 @@ pub trait Dispatcher: Sized + Send {
         // the default implementation isn't enough to initialize the dispatcher's state.
         debug_assert!(state.is_initialized(), "Dispatcher state not initialized!");
         let mut raw = zmq::Message::new().unwrap();
-        let mut sock = self.context().socket(zmq::DEALER).unwrap();
+        let mut sock = (**ZMQ_CONTEXT).as_mut().socket(zmq::DEALER).unwrap();
         let mut envelope = Envelope::default();
         sock.connect(Self::message_queue())?;
         rz.send(()).unwrap();

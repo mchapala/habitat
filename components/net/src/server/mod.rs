@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod heartbeat;
+
 use std::cell::UnsafeCell;
 use std::error;
 use std::result;
@@ -21,7 +23,7 @@ use core::os::process;
 use fnv::FnvHasher;
 use protobuf::{self, parse_from_bytes};
 use protobuf::core::Message as ProtoBufMessage;
-use protocol::{self, Routable, RouteKey};
+use protocol::{self, net, routesrv, Routable, RouteKey};
 use time;
 use zmq;
 
@@ -61,13 +63,13 @@ unsafe impl Send for ServerContext {}
 unsafe impl Sync for ServerContext {}
 
 pub struct Envelope {
-    pub msg: protocol::net::Msg,
+    pub msg: net::Msg,
     hops: Vec<zmq::Message>,
     started: bool,
 }
 
 impl Envelope {
-    pub fn new(hops: Vec<zmq::Message>, msg: protocol::net::Msg) -> Self {
+    pub fn new(hops: Vec<zmq::Message>, msg: net::Msg) -> Self {
         let mut env = Envelope::default();
         env.hops = hops;
         env.msg = msg;
@@ -98,11 +100,11 @@ impl Envelope {
         self.msg.get_message_id()
     }
 
-    pub fn route_info(&self) -> &protocol::net::RouteInfo {
+    pub fn route_info(&self) -> &net::RouteInfo {
         self.msg.get_route_info()
     }
 
-    pub fn protocol(&self) -> protocol::net::Protocol {
+    pub fn protocol(&self) -> net::Protocol {
         self.msg.get_route_info().get_protocol()
     }
 
@@ -133,7 +135,7 @@ impl Envelope {
     pub fn reset(&mut self) {
         self.started = false;
         self.hops.clear();
-        self.msg = protocol::net::Msg::new();
+        self.msg = net::Msg::new();
     }
 
     fn send_header(&mut self, sock: &mut zmq::Socket) -> Result<()> {
@@ -152,7 +154,7 @@ impl Envelope {
 impl Default for Envelope {
     fn default() -> Envelope {
         Envelope {
-            msg: protocol::net::Msg::new(),
+            msg: net::Msg::new(),
             hops: Vec::with_capacity(MAX_HOPS),
             started: false,
         }
@@ -186,7 +188,7 @@ pub trait Service: NetIdent {
     type Config: config::RouterCfg + config::Shards;
     type Error: error::Error + From<Error> + From<zmq::Error>;
 
-    fn protocol() -> protocol::net::Protocol;
+    fn protocol() -> net::Protocol;
 
     fn config(&self) -> &Arc<RwLock<Self::Config>>;
 
@@ -194,45 +196,12 @@ pub trait Service: NetIdent {
     fn conn_mut(&mut self) -> &mut RouteConn;
 
     fn connect(&mut self) -> result::Result<(), Self::Error> {
-        let mut reg = protocol::routesrv::Registration::new();
-        reg.set_protocol(Self::protocol());
-        reg.set_endpoint(Self::net_ident());
-        let (hb_addrs, addrs) = {
-            let cfg = self.config().read().unwrap();
-            reg.set_shards(cfg.shards().clone());
-            let hb_addrs: Vec<String> = cfg.route_addrs()
-                .iter()
-                .map(|f| format!("tcp://{}:{}", f.host, f.heartbeat))
-                .collect();
-            let addrs: Vec<String> = cfg.route_addrs()
-                .iter()
-                .map(|f| f.to_addr_string())
-                .collect();
-            (hb_addrs, addrs)
-        };
-        for addr in &hb_addrs {
-            println!("Connecting to {:?}...", addr);
-            self.conn_mut().register(&addr)?;
-        }
-        let mut ready = 0;
-        let mut rt = zmq::Message::new()?;
-        let mut hb = zmq::Message::new()?;
-        while ready < hb_addrs.len() {
-            self.conn_mut().heartbeat.recv(&mut rt, 0)?;
-            self.conn_mut().heartbeat.recv(&mut hb, 0)?;
-            debug!("received reg request, {:?}", hb.as_str());
-            self.conn_mut().heartbeat.send_str("R", zmq::SNDMORE)?;
-            self.conn_mut().heartbeat.send(
-                &reg.write_to_bytes().unwrap(),
-                0,
-            )?;
-            self.conn_mut().heartbeat.recv(&mut hb, 0)?;
-            ready += 1;
-        }
-        for addr in addrs {
-            self.conn_mut().connect(&addr)?;
-        }
-        println!("Connected");
+        let cfg = self.config().read().unwrap();
+        self.conn_mut().connect(
+            Self::protocol(),
+            Self::net_ident(),
+            &*cfg,
+        )?;
         Ok(())
     }
 }
@@ -265,16 +234,10 @@ impl ServerReg {
         (timespec.sec as i64 * 1000) + (timespec.nsec as i64 / 1000 / 1000)
     }
 
-    pub fn ping(&mut self, socket: &mut zmq::Socket) -> Result<()> {
+    pub fn renew(&mut self) {
         let now_ms = Self::clock_time();
-        if now_ms >= self.ping_at {
-            let ping = protocol::net::Ping::new();
-            let req = protocol::Message::new(&ping).build();
-            let bytes = req.write_to_bytes()?;
-            socket.send(&bytes, 0)?;
-            self.ping_at = Self::clock_time() + PING_INTERVAL;
-        }
-        Ok(())
+        self.ping_at = now_ms + PING_INTERVAL;
+        self.expires = now_ms + SERVER_TTL;
     }
 }
 
@@ -294,9 +257,9 @@ pub struct RouteConn {
 }
 
 impl RouteConn {
-    pub fn new(ident: String, context: &mut zmq::Context) -> Result<Self> {
-        let socket = context.socket(zmq::DEALER)?;
-        let heartbeat = context.socket(zmq::DEALER)?;
+    pub fn new(ident: String) -> Result<Self> {
+        let socket = (**ZMQ_CONTEXT).as_mut().socket(zmq::DEALER)?;
+        let heartbeat = (**ZMQ_CONTEXT).as_mut().socket(zmq::DEALER)?;
         socket.set_identity(ident.as_bytes())?;
         heartbeat.set_identity(format!("hb#{}", ident).as_bytes())?;
         heartbeat.set_probe_router(true)?;
@@ -307,19 +270,46 @@ impl RouteConn {
         })
     }
 
-    pub fn connect(&mut self, addr: &str) -> Result<()> {
-        self.socket.connect(addr)?;
+    fn connect<T>(&mut self, protocol: net::Protocol, netid: String, cfg: &T) -> Result<()>
+    where
+        T: RouterCfg + Shards,
+    {
+        let mut reg = routesrv::Registration::new();
+        reg.set_protocol(protocol);
+        reg.set_endpoint(netid);
+        reg.set_shards(cfg.shards().clone());
+        let addrs: Vec<String> = cfg.route_addrs()
+            .iter()
+            .map(|f| f.to_addr_string())
+            .collect();
+        for addr in addrs {
+            println!("Connecting to {}...", addr);
+            self.socket.connect(&addr)?;
+        }
+        let mut ready = 0;
+        let mut msg = zmq::Message::new()?;
+        while ready < addrs.len() {
+            self.heartbeat.recv(&mut msg, 0)?;
+            self.heartbeat.recv(&mut msg, 0)?;
+            trace!("received reg request, {:?}", msg.as_str());
+            self.heartbeat.send_str("R", zmq::SNDMORE)?;
+            self.heartbeat.send(&reg.write_to_bytes().unwrap(), 0)?;
+            self.heartbeat.recv(&mut msg, 0)?;
+            match msg.as_str() {
+                Some("REGOK") => {
+                    trace!("registration ok");
+                    ready += 1;
+                }
+                Some("REGCONFLICT") => panic!("FIX THIS, ROUTER KNOWS ABOUT OUR SHARD ALREADY"),
+                err => panic!("UNKNOWN REG RESPONSE, {:?}", err),
+            }
+        }
         Ok(())
     }
 
-    pub fn register(&mut self, addr: &str) -> Result<()> {
-        self.heartbeat.connect(addr)?;
-        Ok(())
-    }
-
-    pub fn recv(&mut self, flags: i32) -> Result<protocol::net::Msg> {
+    pub fn recv(&mut self, flags: i32) -> Result<net::Msg> {
         let envelope = self.socket.recv_msg(flags)?;
-        let msg: protocol::net::Msg = parse_from_bytes(&envelope).unwrap();
+        let msg: net::Msg = parse_from_bytes(&envelope).unwrap();
         Ok(msg)
     }
 

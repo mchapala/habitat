@@ -27,7 +27,39 @@ use zmq;
 use config::Config;
 use error::{Error, Result};
 
-pub type ServerMap = HashMap<Protocol, HashMap<ShardId, hab_net::ServerReg>>;
+#[derive(Default)]
+struct ServerMap(HashMap<Protocol, HashMap<ShardId, hab_net::ServerReg>>);
+
+impl ServerMap {
+    pub fn add(&mut self, protocol: Protocol, netid: String, shards: Vec<ShardId>) -> Result<()> {
+        if !self.servers.contains_key(&protocol) {
+            self.servers.insert(protocol, HashMap::default());
+        }
+        let shards = self.servers.get_mut(&protocol).unwrap();
+        for shard in shards {
+            // JW TODO: Check if we think we already have a server servicing this shard
+            shards.insert(shard, hab_net::ServerReg::new(netid));
+        }
+        Ok(())
+    }
+
+    pub fn drop(&mut self, protocol: Protocol, netid: &str) {
+        if let Some(map) = self.0.get_mut(protocol) {
+            map.iter_mut().filter(|reg| reg.endpoint == netid).collect();
+        }
+    }
+
+    pub fn renew(&mut self, netid: &str) {
+        // JW TODO: We can't iterate like this every heartbeat
+        for registrations in self.servers.values_mut() {
+            for registration in registrations.values_mut() {
+                if registration.endpoint == netid {
+                    registration.renew();
+                }
+            }
+        }
+    }
+}
 
 pub struct Server {
     config: Arc<Mutex<Config>>,
@@ -50,7 +82,7 @@ impl Server {
             config: Arc::new(Mutex::new(config)),
             fe_sock: fe_sock,
             hb_sock: hb_sock,
-            servers: ServerMap::new(),
+            servers: ServerMap::default(),
             state: SocketState::default(),
             envelope: Envelope::default(),
             req: zmq::Message::new().unwrap(),
@@ -168,32 +200,32 @@ impl Server {
         self.hb_sock.recv(&mut self.req, 0)?;
         match self.req.as_str() {
             Some("") | None => return Ok(()),
-            Some("R") => (),
+            Some("R") => {
+                // Registration
+                self.hb_sock.recv(&mut self.req, 0)?;
+                let reg: routesrv::Registration = parse_from_bytes(&self.req)?;
+                debug!("received server reg, {:?}", registration);
+                match self.servers.add(
+                    reg.get_protocol(),
+                    reg.take_endpoint(),
+                    reg.take_shards(),
+                ) {
+                    Ok(()) => self.hb_sock.send_str("REGOK", 0),
+                    Err(_) => self.hb_sock.send_str("REGCONFLICT", 0),
+                }
+            }
+            Some("P") => {
+                // Pulse
+                self.hb_sock.recv(&mut self.req, 0)?;
+                self.servers.renew(self.req.as_str());
+            }
             Some(ident) => {
+                // New connection
                 self.hb_sock.send_str(ident, zmq::SNDMORE)?;
                 self.hb_sock.send(&[], zmq::SNDMORE)?;
                 self.hb_sock.send_str("REG", 0)?;
-                return Ok(());
             }
         }
-        self.hb_sock.recv(&mut self.req, 0)?;
-        // JW TODO: this data structure doesn't support a case where a shard *no longer* supports
-        // shards, it only allows for additions. We need to keep track of what any given server reg
-        // supports and then use the servers map as an index on top of that.
-        let registration: routesrv::Registration = parse_from_bytes(&self.req)?;
-        debug!("received server reg, {:?}", registration);
-        if !self.servers.contains_key(&registration.get_protocol()) {
-            self.servers.insert(
-                registration.get_protocol(),
-                HashMap::new(),
-            );
-        }
-        let shards = self.servers.get_mut(&registration.get_protocol()).unwrap();
-        for shard in registration.get_shards().iter() {
-            let server = hab_net::ServerReg::new(registration.get_endpoint().to_string());
-            shards.insert(*shard, server);
-        }
-        self.hb_sock.send_str("REGOK", 0)?;
         Ok(())
     }
 
@@ -203,11 +235,11 @@ impl Server {
 
     fn handle_message(&mut self) -> Result<()> {
         let msg = &self.envelope.msg;
-        debug!("handle-message, msg={:?}", &msg);
+        trace!("handle-message, msg={:?}", &msg);
         match self.envelope.message_id() {
             "Connect" => {
                 let req: routesrv::Connect = parse_from_bytes(msg.get_body()).unwrap();
-                debug!("Connect={:?}", req);
+                trace!("Connect={:?}", req);
                 let rep = protocol::Message::new(&routesrv::ConnectOk::new()).build();
                 self.fe_sock
                     .send(&rep.write_to_bytes().unwrap(), 0)
@@ -215,13 +247,8 @@ impl Server {
             }
             "Disconnect" => {
                 let req: routesrv::Disconnect = parse_from_bytes(msg.get_body()).unwrap();
-                debug!("Disconnect={:?}", req);
-                // JW TODO: handle service disconnection messages
-            }
-            "Registration" => {
-                let req: routesrv::Registration = parse_from_bytes(msg.get_body()).unwrap();
-                debug!("Registration={:?}", req);
-                // JW TODO: handle service server registration update messages
+                trace!("Disconnect={:?}", req);
+                self.servers.drop(req.get_protocol(), req.get_endpoint());
             }
             id => warn!("Unknown message, msg={}", id),
         }
@@ -311,31 +338,32 @@ impl Application for Server {
         let mut fe_msg = false;
         loop {
             {
-                let mut items = [self.hb_sock.as_poll_item(1), self.fe_sock.as_poll_item(1)];
-                // Poll until a message is received on either socket. Checking for the zmq::POLLIN
-                // flag on a poll item's revents will let you know if you have received a message
-                // or not on that socket.
-                // JW TODO: Implement service heartbeat and expiration
-                debug!("waiting for message");
+                let mut items = [
+                    self.hb_sock.as_poll_item(zmq::POLLIN),
+                    self.fe_sock.as_poll_item(zmq::POLLIN),
+                ];
+                trace!("waiting for message");
+                // JW TODO: sleep for duration of next heartbeat we need to expire. Sleep forever
+                // if we haven't heard from anyone yet.
                 zmq::poll(&mut items, -1)?;
-                if (items[0].get_revents() & zmq::POLLIN) > 0 {
+                if items[0].is_readable() {
                     hb_msg = true;
                 }
-                if (items[1].get_revents() & zmq::POLLIN) > 0 {
+                if items[1].is_readable() {
                     fe_msg = true;
                 }
             }
             if hb_msg {
-                debug!("processing heartbeat");
+                trace!("processing heartbeat");
                 self.process_heartbeat()?;
             }
             if fe_msg {
-                debug!("processing front-end");
+                trace!("processing front-end");
                 self.process_frontend()?;
             }
-            debug!("done processing");
             hb_msg = false;
             fe_msg = false;
+            trace!("done processing");
         }
     }
 }

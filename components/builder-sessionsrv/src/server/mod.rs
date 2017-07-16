@@ -100,10 +100,6 @@ impl Dispatcher for Worker {
     fn new(config: Arc<RwLock<Config>>) -> Self {
         Worker { config: config }
     }
-
-    fn context(&mut self) -> &mut zmq::Context {
-        (**ZMQ_CONTEXT).as_mut()
-    }
 }
 
 pub struct Server {
@@ -114,7 +110,7 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: Config) -> Result<Self> {
-        let router = RouteConn::new(Self::net_ident(), (**ZMQ_CONTEXT).as_mut())?;
+        let router = RouteConn::new(Self::net_ident())?;
         let be = (**ZMQ_CONTEXT).as_mut().socket(zmq::DEALER)?;
         Ok(Server {
             config: Arc::new(RwLock::new(config)),

@@ -88,6 +88,13 @@ pub struct RouterAddr {
     pub heartbeat: u16,
 }
 
+impl RouterAddr {
+    /// Build a heartbeat address sttring from self
+    pub fn to_heartbeat_addr(&self) -> String {
+        format!("tcp://{}:{}", self.host, self.heartbeat)
+    }
+}
+
 impl Default for RouterAddr {
     fn default() -> Self {
         RouterAddr {
