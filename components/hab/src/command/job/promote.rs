@@ -12,5 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod start;
-pub mod promote;
+use depot_client::Client as DepotClient;
+use common::ui::{Status, UI};
+
+use {PRODUCT, VERSION};
+use error::{Error, Result};
+
+pub fn start(
+    ui: &mut UI,
+    depot_url: &str,
+    group_id: &str,
+    channel: &str,
+    token: &str,
+) -> Result<()> {
+    debug!("Promoting group")
+    Ok(())
+}
