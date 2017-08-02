@@ -15,10 +15,11 @@
 //! A collection of handlers for the HTTP server's router
 
 use std::env;
+use std::str::FromStr;
 
 use base64;
 use bodyparser;
-use depot::server::check_origin_access;
+use depot::server::{check_origin_access, do_channel_creation, do_promotion};
 use hab_core::package::Plan;
 use hab_core::event::*;
 use hab_net;
@@ -31,7 +32,8 @@ use params::{Params, Value, FromValue};
 use persistent;
 use protocol::jobsrv::{Job, JobGet, JobLogGet, JobLog, JobSpec, ProjectJobsGet,
                        ProjectJobsGetResponse};
-use protocol::scheduler::{ReverseDependenciesGet, ReverseDependencies};
+use protocol::scheduler::{Group, GroupGet, ProjectState, ReverseDependenciesGet,
+                          ReverseDependencies};
 use protocol::originsrv::*;
 use protocol::sessionsrv;
 use protocol::net::{self, NetOk, ErrCode};
@@ -111,6 +113,56 @@ pub fn github_authenticate(req: &mut Request) -> IronResult<Response> {
             Ok(render_net_error(&err))
         }
     }
+}
+
+pub fn job_group_promote(req: &mut Request) -> IronResult<Response> {
+    // JB TODO: eliminate the need to clone the params and session - HI SALIM =)
+    let params = req.extensions.get::<Router>().unwrap().clone();
+    let session = req.extensions.get::<Authenticated>().unwrap().clone();
+    let session_id = session.get_id();
+
+    let group_id = match params.find("id") {
+        Some(id) => {
+            match id.parse::<u64>() {
+                Ok(g) => g,
+                Err(_) => return Ok(Response::with(status::BadRequest)),
+            }
+        }
+        None => return Ok(Response::with(status::BadRequest)),
+    };
+
+    let channel = match params.find("channel") {
+        Some(c) => c.to_string(),
+        None => return Ok(Response::with(status::BadRequest)),
+    };
+
+    let mut group_get = GroupGet::new();
+    group_get.set_group_id(group_id);
+
+    let mut conn = Broker::connect().unwrap();
+    let group = match conn.route::<GroupGet, Group>(&group_get) {
+        Ok(g) => g,
+        Err(err) => return Ok(render_net_error(&err)),
+    };
+
+    // JB TODO - This logic was mostly ported here from the scheduler, so that the scheduler can
+    // now just make 1 HTTP call to promote a group, instead of N calls for every project in the
+    // group. But, it does seem odd for the scheduler to be making HTTP calls to builder-api when
+    // we have a zmq API that's much faster for use between services.
+    for project in group.get_projects().into_iter().filter(|x| {
+        x.get_state() == ProjectState::Success
+    })
+    {
+        let ident = OriginPackageIdent::from_str(project.get_ident()).unwrap();
+
+        if &channel != "stable" {
+            do_channel_creation(req, ident.get_origin(), &channel, session_id)?;
+        }
+
+        do_promotion(req, ident, &channel, session_id)?;
+    }
+
+    Ok(Response::with(status::Ok))
 }
 
 pub fn rdeps_show(req: &mut Request) -> IronResult<Response> {
