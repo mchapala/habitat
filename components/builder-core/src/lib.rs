@@ -25,8 +25,8 @@ extern crate walkdir;
 extern crate chrono;
 extern crate protobuf;
 
-pub mod metrics;
-pub mod rdeps;
-pub mod package_graph;
 pub mod file_walker;
 pub mod logger;
+pub mod metrics;
+pub mod package_graph;
+pub mod rdeps;

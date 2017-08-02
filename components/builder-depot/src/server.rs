@@ -1447,39 +1447,21 @@ fn create_channel(req: &mut Request) -> IronResult<Response> {
     let origin: String;
     let channel: String;
 
-    {
-        let session = req.extensions.get::<Authenticated>().unwrap();
-        session_id = session.get_id();
-        let params = req.extensions.get::<Router>().unwrap();
-        origin = match params.find("origin") {
-            Some(origin) => origin.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
-        };
-        channel = match params.find("channel") {
-            Some(channel) => channel.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
-        };
-    }
+    // JB TODO: eliminate the need to clone the session and params.  HI SALIM =)
+    let session = req.extensions.get::<Authenticated>().unwrap().clone();
+    session_id = session.get_id();
 
-    let origin_id = match get_origin(req, &origin)? {
-        Some(origin) => origin.get_id(),
-        None => {
-            debug!("Origin {} not found!", origin);
-            return Ok(Response::with(status::NotFound));
-        }
+    let params = req.extensions.get::<Router>().unwrap().clone();
+    origin = match params.find("origin") {
+        Some(origin) => origin.to_string(),
+        _ => return Ok(Response::with(status::BadRequest)),
+    };
+    channel = match params.find("channel") {
+        Some(channel) => channel.to_string(),
+        _ => return Ok(Response::with(status::BadRequest)),
     };
 
-    let mut request = OriginChannelCreate::new();
-
-    request.set_owner_id(session_id);
-    request.set_origin_name(origin);
-    request.set_origin_id(origin_id);
-    request.set_name(channel);
-
-    match route_message::<OriginChannelCreate, OriginChannel>(req, &request) {
-        Ok(origin_channel) => Ok(render_json(status::Created, &origin_channel)),
-        Err(err) => Ok(render_net_error(&err)),
-    }
+    do_channel_creation(req, &origin, &channel, session_id)
 }
 
 fn delete_channel(req: &mut Request) -> IronResult<Response> {
@@ -1759,10 +1741,10 @@ fn render_package(pkg: &OriginPackage, should_cache: bool) -> IronResult<Respons
 
 fn promote_package(req: &mut Request) -> IronResult<Response> {
     let (channel, ident, session_id) = {
-        let session = req.extensions.get::<Authenticated>().unwrap();
+        let session = req.extensions.get::<Authenticated>().unwrap().clone();
         let session_id = session.get_id();
 
-        let params = req.extensions.get::<Router>().unwrap();
+        let params = req.extensions.get::<Router>().unwrap().clone();
         let origin = match params.find("origin") {
             Some(o) => o.to_string(),
             _ => return Ok(Response::with(status::BadRequest)),
@@ -1797,52 +1779,7 @@ fn promote_package(req: &mut Request) -> IronResult<Response> {
         (channel, ident, session_id)
     };
 
-    let mut channel_req = OriginChannelGet::new();
-    channel_req.set_origin_name(ident.get_origin().to_string());
-    channel_req.set_name(channel);
-    match route_message::<OriginChannelGet, OriginChannel>(req, &channel_req) {
-        Ok(origin_channel) => {
-            if !check_origin_access(req, session_id, &ident.get_origin())? {
-                return Ok(Response::with(status::Forbidden));
-            }
-
-            let mut request = OriginPackageGet::new();
-            request.set_ident(ident.clone());
-            match route_message::<OriginPackageGet, OriginPackage>(req, &request) {
-                Ok(package) => {
-                    let mut promote = OriginPackagePromote::new();
-                    promote.set_channel_id(origin_channel.get_id());
-                    promote.set_package_id(package.get_id());
-                    promote.set_ident(ident);
-                    match route_message::<OriginPackagePromote, NetOk>(req, &promote) {
-                        Ok(_) => Ok(Response::with(status::Ok)),
-                        Err(err) => {
-                            error!("Error promoting package, {}", err);
-                            Ok(render_net_error(&err))
-                        }
-                    }
-                }
-                Err(err) => {
-                    match err.get_code() {
-                        ErrCode::ENTITY_NOT_FOUND => Ok(Response::with((status::NotFound))),
-                        _ => {
-                            error!("promote:2, err={:?}", err);
-                            Ok(Response::with(status::InternalServerError))
-                        }
-                    }
-                }
-            }
-        }
-        Err(err) => {
-            match err.get_code() {
-                ErrCode::ENTITY_NOT_FOUND => Ok(Response::with((status::NotFound))),
-                _ => {
-                    error!("promote_package:1, err={:?}", err);
-                    Ok(Response::with(status::InternalServerError))
-                }
-            }
-        }
-    }
+    do_promotion(req, ident, &channel, session_id)
 }
 
 fn demote_package(req: &mut Request) -> IronResult<Response> {
@@ -1976,6 +1913,88 @@ fn target_from_headers(user_agent_header: &UserAgent) -> result::Result<PackageT
     match PackageTarget::from_str(target) {
         Ok(t) => Ok(t),
         Err(_) => Err(Response::with(status::BadRequest)),
+    }
+}
+
+pub fn do_channel_creation(
+    req: &mut Request,
+    origin: &str,
+    channel: &str,
+    session_id: u64,
+) -> IronResult<Response> {
+    let origin_id = match get_origin(req, origin)? {
+        Some(o) => o.get_id(),
+        None => {
+            debug!("Origin {} not found!", origin);
+            return Ok(Response::with(status::NotFound));
+        }
+    };
+
+    let mut request = OriginChannelCreate::new();
+
+    request.set_owner_id(session_id);
+    request.set_origin_name(origin.to_string());
+    request.set_origin_id(origin_id);
+    request.set_name(channel.to_string());
+
+    match route_message::<OriginChannelCreate, OriginChannel>(req, &request) {
+        Ok(origin_channel) => Ok(render_json(status::Created, &origin_channel)),
+        Err(err) => Ok(render_net_error(&err)),
+    }
+}
+
+pub fn do_promotion(
+    req: &mut Request,
+    ident: OriginPackageIdent,
+    channel: &str,
+    session_id: u64,
+) -> IronResult<Response> {
+    let mut channel_req = OriginChannelGet::new();
+    channel_req.set_origin_name(ident.get_origin().to_string());
+    channel_req.set_name(channel.to_string());
+
+    match route_message::<OriginChannelGet, OriginChannel>(req, &channel_req) {
+        Ok(origin_channel) => {
+            if !check_origin_access(req, session_id, &ident.get_origin())? {
+                return Ok(Response::with(status::Forbidden));
+            }
+
+            let mut request = OriginPackageGet::new();
+            request.set_ident(ident.clone());
+            match route_message::<OriginPackageGet, OriginPackage>(req, &request) {
+                Ok(package) => {
+                    let mut promote = OriginPackagePromote::new();
+                    promote.set_channel_id(origin_channel.get_id());
+                    promote.set_package_id(package.get_id());
+                    promote.set_ident(ident);
+                    match route_message::<OriginPackagePromote, NetOk>(req, &promote) {
+                        Ok(_) => Ok(Response::with(status::Ok)),
+                        Err(err) => {
+                            error!("Error promoting package, {}", err);
+                            Ok(render_net_error(&err))
+                        }
+                    }
+                }
+                Err(err) => {
+                    match err.get_code() {
+                        ErrCode::ENTITY_NOT_FOUND => Ok(Response::with((status::NotFound))),
+                        _ => {
+                            error!("promote:2, err={:?}", err);
+                            Ok(Response::with(status::InternalServerError))
+                        }
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            match err.get_code() {
+                ErrCode::ENTITY_NOT_FOUND => Ok(Response::with((status::NotFound))),
+                _ => {
+                    error!("promote_package:1, err={:?}", err);
+                    Ok(Response::with(status::InternalServerError))
+                }
+            }
+        }
     }
 }
 
