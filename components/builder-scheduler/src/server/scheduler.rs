@@ -449,6 +449,9 @@ impl ScheduleMgr {
     fn promote_package(&self, ident: &OriginPackageIdent, channel: &str) -> Result<()> {
         debug!("Promoting '{:?}' to '{}'", ident, channel);
 
+        // JB TODO: this all needs to change to be a builder-api-client, using the new group
+        // promotion endpoint
+
         // We re-create the depot client instead of caching and re-using it due to the
         // connection getting dropped when it is attempted to be re-used. This _may_ be
         // a known issue with hyper connection pool getting reset in some cases.

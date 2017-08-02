@@ -143,6 +143,21 @@ impl Client {
         Ok(rd.rdeps.to_vec())
     }
 
+    /// Promote a job group to a channel
+    ///
+    /// # Failures
+    ///
+    /// * Remote API Server is not available
+    pub fn job_group_promote(&self, group_id: u64, channel: &str) -> Result<()> {
+        debug!("Promoting job group {} to channel {}", group_id, channel);
+        let url = format!("jobs/group/{}/promote/{}", group_id, channel);
+        let res = self.0.post(&url).send().map_err(Error::HyperError)?;
+        if res.status != StatusCode::Ok {
+            return Err(err_from_response(res));
+        }
+        Ok(())
+    }
+
     fn add_authz<'a>(&'a self, rb: RequestBuilder<'a>, token: &str) -> RequestBuilder {
         rb.header(Authorization(Bearer { token: token.to_string() }))
     }
