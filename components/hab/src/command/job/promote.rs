@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use depot_client::Client as DepotClient;
+use api_client;
 use common::ui::{Status, UI};
 
 use {PRODUCT, VERSION};
@@ -25,6 +25,26 @@ pub fn start(
     channel: &str,
     token: &str,
 ) -> Result<()> {
-    debug!("Promoting group")
+    let api_client = api_client::Client::new(depot_url, PRODUCT, VERSION, None)
+        .map_err(Error::APIClient)?;
+    let gid = match group_id.parse::<u64>() {
+        Ok(g) => g,
+        Err(e) => {
+            ui.fatal(format!("Failed to parse group id: {}", e))?;
+            return Err(Error::ParseIntError(e));
+        }
+    };
+
+    ui.status(
+        Status::Promoting,
+        format!("job group {} to channel {}", group_id, channel),
+    )?;
+    api_client.job_group_promote(gid, channel, token).map_err(
+        Error::APIClient,
+    )?;
+    ui.status(
+        Status::Promoted,
+        format!("job group {} to channel {}", group_id, channel),
+    )?;
     Ok(())
 }
