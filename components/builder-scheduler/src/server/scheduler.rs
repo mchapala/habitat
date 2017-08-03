@@ -17,7 +17,6 @@ use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use hab_net::server::ZMQ_CONTEXT;
 use hab_net::routing::Broker;
@@ -35,6 +34,7 @@ use config::Config;
 use bldr_core::logger::Logger;
 use hab_core::channel::bldr_channel_name;
 use depot_client;
+use api_client;
 use {PRODUCT, VERSION};
 
 const SCHEDULER_ADDR: &'static str = "inproc://scheduler";
@@ -449,9 +449,6 @@ impl ScheduleMgr {
     fn promote_package(&self, ident: &OriginPackageIdent, channel: &str) -> Result<()> {
         debug!("Promoting '{:?}' to '{}'", ident, channel);
 
-        // JB TODO: this all needs to change to be a builder-api-client, using the new group
-        // promotion endpoint
-
         // We re-create the depot client instead of caching and re-using it due to the
         // connection getting dropped when it is attempted to be re-used. This _may_ be
         // a known issue with hyper connection pool getting reset in some cases.
@@ -489,16 +486,11 @@ impl ScheduleMgr {
     fn promote_group(&self, group: &proto::Group, channel: &str) -> Result<()> {
         debug!("Promoting group {} to {} channel", group.get_id(), channel);
 
-        for project in group.get_projects().into_iter().filter(|x| {
-            x.get_state() == proto::ProjectState::Success
-        })
-        {
-            self.promote_package(
-                &OriginPackageIdent::from_str(project.get_ident())
-                    .unwrap(),
-                channel,
-            )?;
-        }
+        let api_client = api_client::Client::new(&self.depot_url, PRODUCT, VERSION, None)
+            .map_err(Error::APIClient)?;
+        api_client
+            .job_group_promote(group.get_id(), channel, &self.auth_token)
+            .map_err(Error::APIClient)?;
 
         Ok(())
     }

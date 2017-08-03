@@ -148,10 +148,12 @@ impl Client {
     /// # Failures
     ///
     /// * Remote API Server is not available
-    pub fn job_group_promote(&self, group_id: u64, channel: &str) -> Result<()> {
+    pub fn job_group_promote(&self, group_id: u64, channel: &str, token: &str) -> Result<()> {
         debug!("Promoting job group {} to channel {}", group_id, channel);
         let url = format!("jobs/group/{}/promote/{}", group_id, channel);
-        let res = self.0.post(&url).send().map_err(Error::HyperError)?;
+        let res = self.add_authz(self.0.post(&url), token).send().map_err(
+            Error::HyperError,
+        )?;
         if res.status != StatusCode::Ok {
             return Err(err_from_response(res));
         }
