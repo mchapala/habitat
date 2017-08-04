@@ -1970,7 +1970,7 @@ pub fn do_promotion(
                     match route_message::<OriginPackagePromote, NetOk>(req, &promote) {
                         Ok(_) => Ok(Response::with(status::Ok)),
                         Err(err) => {
-                            error!("Error promoting package, {}", err);
+                            error!("promote:1, err={:?}", err);
                             Ok(render_net_error(&err))
                         }
                     }
@@ -1990,7 +1990,7 @@ pub fn do_promotion(
             match err.get_code() {
                 ErrCode::ENTITY_NOT_FOUND => Ok(Response::with((status::NotFound))),
                 _ => {
-                    error!("promote_package:1, err={:?}", err);
+                    error!("promote:3, err={:?}", err);
                     Ok(Response::with(status::InternalServerError))
                 }
             }
