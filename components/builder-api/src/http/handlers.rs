@@ -266,7 +266,7 @@ pub fn job_log(req: &mut Request) -> IronResult<Response> {
                     }
                 }
             }
-            _ => 0,
+            None => 0,
         }
     };
 
@@ -378,7 +378,7 @@ pub fn project_create(req: &mut Request) -> IronResult<Response> {
             }
             (body.github.organization, body.github.repo)
         }
-        _ => return Ok(Response::with(status::UnprocessableEntity)),
+        Err(_) => return Ok(Response::with(status::UnprocessableEntity)),
     };
     let mut conn = Broker::connect().unwrap();
     let origin = match conn.route::<OriginGet, Origin>(&origin_get) {
@@ -530,7 +530,7 @@ pub fn project_update(req: &mut Request) -> IronResult<Response> {
             }
             (body.github.organization, body.github.repo)
         }
-        _ => return Ok(Response::with(status::UnprocessableEntity)),
+        Err(_) => return Ok(Response::with(status::UnprocessableEntity)),
     };
     let mut conn = Broker::connect().unwrap();
     match github.contents(

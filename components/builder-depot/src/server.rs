@@ -173,7 +173,7 @@ pub fn origin_create(req: &mut Request) -> IronResult<Response> {
     }
     match req.get::<bodyparser::Struct<OriginCreateReq>>() {
         Ok(Some(body)) => request.set_name(body.name),
-        _ => return Ok(Response::with(status::UnprocessableEntity)),
+        None => return Ok(Response::with(status::UnprocessableEntity)),
     };
 
     if !ident::is_valid_origin_name(request.get_name()) {
@@ -191,7 +191,7 @@ pub fn origin_show(req: &mut Request) -> IronResult<Response> {
     let params = req.extensions.get::<Router>().unwrap();
     let origin = match params.find("origin") {
         Some(origin) => origin.to_string(),
-        _ => return Ok(Response::with(status::BadRequest)),
+        None => return Ok(Response::with(status::BadRequest)),
     };
 
     let mut conn = Broker::connect().unwrap();
@@ -1230,12 +1230,12 @@ fn list_package_versions(req: &mut Request) -> IronResult<Response> {
 
         let origin = match params.find("origin") {
             Some(origin) => origin.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let name = match params.find("pkg") {
             Some(pkg) => pkg.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         (origin, name)
@@ -1289,7 +1289,7 @@ fn list_packages(req: &mut Request) -> IronResult<Response> {
 
         let origin = match params.find("origin") {
             Some(origin) => origin.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let ident: String = if params.find("pkg").is_none() {
@@ -1454,11 +1454,11 @@ fn create_channel(req: &mut Request) -> IronResult<Response> {
     let params = req.extensions.get::<Router>().unwrap().clone();
     origin = match params.find("origin") {
         Some(origin) => origin.to_string(),
-        _ => return Ok(Response::with(status::BadRequest)),
+        None => return Ok(Response::with(status::BadRequest)),
     };
     channel = match params.find("channel") {
         Some(channel) => channel.to_string(),
-        _ => return Ok(Response::with(status::BadRequest)),
+        None => return Ok(Response::with(status::BadRequest)),
     };
 
     do_channel_creation(req, &origin, &channel, session_id)
@@ -1474,11 +1474,11 @@ fn delete_channel(req: &mut Request) -> IronResult<Response> {
         let params = req.extensions.get::<Router>().unwrap();
         origin = match params.find("origin") {
             Some(origin) => origin.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
         channel = match params.find("channel") {
             Some(channel) => channel.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
     }
 
@@ -1747,27 +1747,27 @@ fn promote_package(req: &mut Request) -> IronResult<Response> {
         let params = req.extensions.get::<Router>().unwrap().clone();
         let origin = match params.find("origin") {
             Some(o) => o.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let channel = match params.find("channel") {
             Some(c) => c.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let pkg = match params.find("pkg") {
             Some(p) => p.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let version = match params.find("version") {
             Some(v) => v.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let release = match params.find("release") {
             Some(r) => r.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let mut ident = OriginPackageIdent::new();
@@ -1790,27 +1790,27 @@ fn demote_package(req: &mut Request) -> IronResult<Response> {
         let params = req.extensions.get::<Router>().unwrap();
         let origin = match params.find("origin") {
             Some(o) => o.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let channel = match params.find("channel") {
             Some(c) => c.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let pkg = match params.find("pkg") {
             Some(p) => p.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let version = match params.find("version") {
             Some(v) => v.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let release = match params.find("release") {
             Some(r) => r.to_string(),
-            _ => return Ok(Response::with(status::BadRequest)),
+            None => return Ok(Response::with(status::BadRequest)),
         };
 
         let mut ident = OriginPackageIdent::new();
