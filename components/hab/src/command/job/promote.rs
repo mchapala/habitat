@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hyper::status::StatusCode;
+
 use api_client;
 use common::ui::{Status, UI};
 
@@ -39,12 +41,35 @@ pub fn start(
         Status::Promoting,
         format!("job group {} to channel {}", group_id, channel),
     )?;
-    api_client.job_group_promote(gid, channel, token).map_err(
+
+    match api_client.job_group_promote(gid, channel, token).map_err(
         Error::APIClient,
-    )?;
-    ui.status(
-        Status::Promoted,
-        format!("job group {} to channel {}", group_id, channel),
-    )?;
+    ) {
+        Ok(projects) => {
+            if projects.is_empty() {
+                ui.status(
+                    Status::Promoted,
+                    format!("job group {} to channel {}", group_id, channel),
+                )?;
+            } else {
+                ui.status(
+                    Status::Promoted,
+                    format!(
+                        "job group {} to channel {}, but the following projects failed to promote:",
+                        group_id,
+                        channel
+                    ),
+                )?;
+                for p in projects {
+                    println!("{}", p);
+                }
+            }
+        }
+        Err(Error::APIClient(api_client::Error::APIError(StatusCode::Forbidden, _))) => {
+            return Err(Error::JobGroupPromote(gid, channel.to_string()));
+        }
+        Err(e) => return Err(e),
+    };
+
     Ok(())
 }

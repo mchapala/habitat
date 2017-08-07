@@ -173,7 +173,7 @@ pub fn origin_create(req: &mut Request) -> IronResult<Response> {
     }
     match req.get::<bodyparser::Struct<OriginCreateReq>>() {
         Ok(Some(body)) => request.set_name(body.name),
-        None => return Ok(Response::with(status::UnprocessableEntity)),
+        _ => return Ok(Response::with(status::UnprocessableEntity)),
     };
 
     if !ident::is_valid_origin_name(request.get_name()) {

@@ -11,25 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![cfg_attr(feature="clippy", feature(plugin))]
-#![cfg_attr(feature="clippy", plugin(clippy))]
 
-extern crate habitat_core as hab_core;
-extern crate habitat_builder_protocol as protocol;
-#[macro_use]
-extern crate log;
-extern crate statsd;
-extern crate time;
-extern crate petgraph;
-extern crate walkdir;
-extern crate chrono;
-extern crate protobuf;
-#[macro_use]
-extern crate serde_derive;
+// The purpose of this module is to have a place to put common data structures that are required by
+// both the client and the server, e.g. the server generates a JSON response and the client needs
+// to read and parse it.
 
-pub mod data_structures;
-pub mod file_walker;
-pub mod logger;
-pub mod metrics;
-pub mod package_graph;
-pub mod rdeps;
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnsuccessfulJobGroupPromote {
+    pub group_id: u64,
+    pub projects: Vec<String>,
+}

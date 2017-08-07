@@ -19,6 +19,7 @@ use std::str::FromStr;
 
 use base64;
 use bodyparser;
+use builder_core::data_structures::UnsuccessfulJobGroupPromote;
 use depot::server::{check_origin_access, do_channel_creation, do_promotion};
 use hab_core::package::Plan;
 use hab_core::event::*;
@@ -32,12 +33,13 @@ use params::{Params, Value, FromValue};
 use persistent;
 use protocol::jobsrv::{Job, JobGet, JobLogGet, JobLog, JobSpec, ProjectJobsGet,
                        ProjectJobsGetResponse};
-use protocol::scheduler::{Group, GroupGet, ProjectState, ReverseDependenciesGet,
+use protocol::scheduler::{Group, GroupGet, GroupState, ProjectState, ReverseDependenciesGet,
                           ReverseDependencies};
 use protocol::originsrv::*;
 use protocol::sessionsrv;
 use protocol::net::{self, NetOk, ErrCode};
 use router::Router;
+use serde_json;
 
 // For the initial release, Builder will only be enabled on the "core"
 // origin. Later, we'll roll it out to other origins; at that point,
@@ -145,24 +147,39 @@ pub fn job_group_promote(req: &mut Request) -> IronResult<Response> {
         Err(err) => return Ok(render_net_error(&err)),
     };
 
-    // JB TODO - This logic was mostly ported here from the scheduler, so that the scheduler can
-    // now just make 1 HTTP call to promote a group, instead of N calls for every project in the
-    // group. But, it does seem odd for the scheduler to be making HTTP calls to builder-api when
-    // we have a zmq API that's much faster for use between services.
-    for project in group.get_projects().into_iter().filter(|x| {
-        x.get_state() == ProjectState::Success
-    })
-    {
-        let ident = OriginPackageIdent::from_str(project.get_ident()).unwrap();
-
-        if &channel != "stable" {
-            do_channel_creation(req, ident.get_origin(), &channel, session_id)?;
-        }
-
-        do_promotion(req, ident, &channel, session_id)?;
+    // This only makes sense if the group is complete. If the group isn't complete, return now and
+    // let the user know.
+    if group.get_state() != GroupState::Complete {
+        return Ok(Response::with((status::Forbidden, "rg:jgp:1")));
     }
 
-    Ok(Response::with(status::Ok))
+    let mut projects = Vec::new();
+
+    for project in group.get_projects().into_iter() {
+        if project.get_state() == ProjectState::Success {
+            let ident = OriginPackageIdent::from_str(project.get_ident()).unwrap();
+
+            if &channel != "stable" {
+                do_channel_creation(req, ident.get_origin(), &channel, session_id)?;
+            }
+
+            do_promotion(req, ident, &channel, session_id)?;
+        } else {
+            projects.push(project.get_ident().to_string());
+        }
+    }
+
+    if projects.is_empty() {
+        Ok(Response::with(status::Ok))
+    } else {
+        let json = UnsuccessfulJobGroupPromote {
+            group_id: group.get_id(),
+            projects: projects,
+        };
+        let resp = serde_json::to_string(&json).unwrap();
+
+        Ok(Response::with((status::Ok, resp)))
+    }
 }
 
 pub fn rdeps_show(req: &mut Request) -> IronResult<Response> {
@@ -266,7 +283,7 @@ pub fn job_log(req: &mut Request) -> IronResult<Response> {
                     }
                 }
             }
-            None => 0,
+            _ => 0,
         }
     };
 
@@ -378,7 +395,7 @@ pub fn project_create(req: &mut Request) -> IronResult<Response> {
             }
             (body.github.organization, body.github.repo)
         }
-        Err(_) => return Ok(Response::with(status::UnprocessableEntity)),
+        _ => return Ok(Response::with(status::UnprocessableEntity)),
     };
     let mut conn = Broker::connect().unwrap();
     let origin = match conn.route::<OriginGet, Origin>(&origin_get) {
@@ -530,7 +547,7 @@ pub fn project_update(req: &mut Request) -> IronResult<Response> {
             }
             (body.github.organization, body.github.repo)
         }
-        Err(_) => return Ok(Response::with(status::UnprocessableEntity)),
+        _ => return Ok(Response::with(status::UnprocessableEntity)),
     };
     let mut conn = Broker::connect().unwrap();
     match github.contents(
