@@ -14,13 +14,14 @@
 
 //! A collection of handlers for the HTTP server's router
 
+use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
 
 use base64;
 use bodyparser;
 use builder_core::data_structures::UnsuccessfulJobGroupPromote;
-use depot::server::{check_origin_access, do_channel_creation, do_promotion};
+use depot::server::{check_origin_access, do_channel_creation};
 use hab_core::package::Plan;
 use hab_core::event::*;
 use hab_net;
@@ -33,8 +34,8 @@ use params::{Params, Value, FromValue};
 use persistent;
 use protocol::jobsrv::{Job, JobGet, JobLogGet, JobLog, JobSpec, ProjectJobsGet,
                        ProjectJobsGetResponse};
-use protocol::scheduler::{Group, GroupGet, GroupState, ProjectState, ReverseDependenciesGet,
-                          ReverseDependencies};
+use protocol::scheduler::{Group, GroupGet, GroupState, Project, ProjectState,
+                          ReverseDependenciesGet, ReverseDependencies};
 use protocol::originsrv::*;
 use protocol::sessionsrv;
 use protocol::net::{self, NetOk, ErrCode};
@@ -153,8 +154,16 @@ pub fn job_group_promote(req: &mut Request) -> IronResult<Response> {
         return Ok(Response::with((status::Forbidden, "rg:jgp:1")));
     }
 
-    let mut projects = Vec::new();
+    let mut failed_projects = Vec::new();
+    let mut origin_map = HashMap::new();
 
+    // We can't assume that every project in the group belongs to the same origin. It's entirely
+    // possible that there are multiple origins present within the group. Because of this, there's
+    // no way to atomically commit the entire promotion at once. It's possible origin shards can be
+    // on different machines, so for now, the best we can do is partition the projects by origin,
+    // and commit each origin at once. Ultimately, it'd be nice to have a way to atomically commit
+    // the entire promotion at once, but that would require a cross-shard tool that we don't
+    // currently have.
     for project in group.get_projects().into_iter() {
         if project.get_state() == ProjectState::Success {
             let ident = OriginPackageIdent::from_str(project.get_ident()).unwrap();
@@ -163,18 +172,37 @@ pub fn job_group_promote(req: &mut Request) -> IronResult<Response> {
                 do_channel_creation(req, ident.get_origin(), &channel, session_id)?;
             }
 
-            do_promotion(req, ident, &channel, session_id)?;
+            let mut project_list = origin_map.entry(ident.get_origin().to_string()).or_insert(
+                Vec::new(),
+            );
+            project_list.push(project);
         } else {
-            projects.push(project.get_ident().to_string());
+            failed_projects.push(project.get_ident().to_string());
         }
     }
 
-    if projects.is_empty() {
+    // Now that we've sorted all the projects into a HashMap keyed on origin, we can process them,
+    // one origin at a time. We do "core" first.
+    if let Some(core_projects) = origin_map.remove("core") {
+        let promote_result = do_group_promotion(&channel, core_projects, "core");
+        if !promote_result.is_ok() {
+            return promote_result;
+        }
+    }
+
+    for (origin, projects) in origin_map.iter() {
+        let promote_result = do_group_promotion(&channel, projects.to_vec(), &origin);
+        if !promote_result.is_ok() {
+            return promote_result;
+        }
+    }
+
+    if failed_projects.is_empty() {
         Ok(Response::with(status::Ok))
     } else {
         let json = UnsuccessfulJobGroupPromote {
             group_id: group.get_id(),
-            projects: projects,
+            projects: failed_projects,
         };
         let resp = serde_json::to_string(&json).unwrap();
 
@@ -638,6 +666,47 @@ pub fn project_jobs(req: &mut Request) -> IronResult<Response> {
     let mut conn = Broker::connect().unwrap();
     match conn.route::<ProjectJobsGet, ProjectJobsGetResponse>(&jobs_get) {
         Ok(jobs) => Ok(render_json(status::Ok, &jobs)),
+        Err(err) => Ok(render_net_error(&err)),
+    }
+}
+
+fn do_group_promotion(
+    channel: &str,
+    projects: Vec<&Project>,
+    origin: &str,
+) -> IronResult<Response> {
+    let mut conn = Broker::connect().unwrap();
+    let mut ocg = OriginChannelGet::new();
+    ocg.set_origin_name(origin.to_string());
+    ocg.set_name(channel.to_string());
+
+    let mut package_ids = Vec::new();
+
+    let channel = match conn.route::<OriginChannelGet, OriginChannel>(&ocg) {
+        Ok(c) => c,
+        Err(err) => return Ok(render_net_error(&err)),
+    };
+
+    for project in projects {
+        let opi = OriginPackageIdent::from_str(project.get_ident()).unwrap();
+        let mut opg = OriginPackageGet::new();
+        opg.set_ident(opi);
+
+        let op = match conn.route::<OriginPackageGet, OriginPackage>(&opg) {
+            Ok(o) => o,
+            Err(err) => return Ok(render_net_error(&err)),
+        };
+
+        package_ids.push(op.get_id());
+    }
+
+    let mut opgp = OriginPackageGroupPromote::new();
+    opgp.set_channel_id(channel.get_id());
+    opgp.set_package_ids(package_ids);
+    opgp.set_origin(origin.to_string());
+
+    match conn.route::<OriginPackageGroupPromote, NetOk>(&opgp) {
+        Ok(_) => Ok(Response::with(status::Ok)),
         Err(err) => Ok(render_net_error(&err)),
     }
 }
