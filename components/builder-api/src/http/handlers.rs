@@ -169,7 +169,7 @@ pub fn job_group_promote(req: &mut Request) -> IronResult<Response> {
             let ident = OriginPackageIdent::from_str(project.get_ident()).unwrap();
 
             if &channel != "stable" {
-                do_channel_creation(req, ident.get_origin(), &channel, session_id)?;
+                do_channel_creation(ident.get_origin(), &channel, session_id)?;
             }
 
             let mut project_list = origin_map.entry(ident.get_origin().to_string()).or_insert(
