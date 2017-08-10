@@ -14,14 +14,13 @@
 
 //! A collection of handlers for the HTTP server's router
 
-use std::collections::HashMap;
 use std::env;
-use std::str::FromStr;
 
 use base64;
 use bodyparser;
-use builder_core::data_structures::UnsuccessfulJobGroupPromote;
-use depot::server::{check_origin_access, do_channel_creation};
+use bld_core;
+use bld_core::api::promote_job_group_to_channel;
+use depot::server::check_origin_access;
 use hab_core::package::Plan;
 use hab_core::event::*;
 use hab_net;
@@ -34,8 +33,7 @@ use params::{Params, Value, FromValue};
 use persistent;
 use protocol::jobsrv::{Job, JobGet, JobLogGet, JobLog, JobSpec, ProjectJobsGet,
                        ProjectJobsGetResponse};
-use protocol::scheduler::{Group, GroupGet, GroupState, Project, ProjectState,
-                          ReverseDependenciesGet, ReverseDependencies};
+use protocol::scheduler::{ReverseDependenciesGet, ReverseDependencies};
 use protocol::originsrv::*;
 use protocol::sessionsrv;
 use protocol::net::{self, NetOk, ErrCode};
@@ -139,74 +137,20 @@ pub fn job_group_promote(req: &mut Request) -> IronResult<Response> {
         None => return Ok(Response::with(status::BadRequest)),
     };
 
-    let mut group_get = GroupGet::new();
-    group_get.set_group_id(group_id);
-
-    let mut conn = Broker::connect().unwrap();
-    let group = match conn.route::<GroupGet, Group>(&group_get) {
-        Ok(g) => g,
-        Err(err) => return Ok(render_net_error(&err)),
-    };
-
-    // This only makes sense if the group is complete. If the group isn't complete, return now and
-    // let the user know.
-    if group.get_state() != GroupState::Complete {
-        return Ok(Response::with((status::Forbidden, "rg:jgp:1")));
-    }
-
-    let mut failed_projects = Vec::new();
-    let mut origin_map = HashMap::new();
-
-    // We can't assume that every project in the group belongs to the same origin. It's entirely
-    // possible that there are multiple origins present within the group. Because of this, there's
-    // no way to atomically commit the entire promotion at once. It's possible origin shards can be
-    // on different machines, so for now, the best we can do is partition the projects by origin,
-    // and commit each origin at once. Ultimately, it'd be nice to have a way to atomically commit
-    // the entire promotion at once, but that would require a cross-shard tool that we don't
-    // currently have.
-    for project in group.get_projects().into_iter() {
-        if project.get_state() == ProjectState::Success {
-            let ident = OriginPackageIdent::from_str(project.get_ident()).unwrap();
-
-            if &channel != "stable" {
-                do_channel_creation(ident.get_origin(), &channel, session_id)?;
-            }
-
-            let mut project_list = origin_map.entry(ident.get_origin().to_string()).or_insert(
-                Vec::new(),
-            );
-            project_list.push(project);
-        } else {
-            failed_projects.push(project.get_ident().to_string());
+    match promote_job_group_to_channel(group_id, &channel, session_id) {
+        Ok(_) => Ok(Response::with(status::Ok)),
+        Err(bld_core::Error::NetError(e)) => Ok(render_net_error(&e)),
+        Err(bld_core::Error::GroupNotComplete) => Ok(
+            Response::with((status::Forbidden, "rg:jgp:1")),
+        ),
+        Err(bld_core::Error::OriginAccessDenied) => Ok(
+            Response::with((status::Forbidden, "rg:jpg:3")),
+        ),
+        Err(bld_core::Error::UnsuccessfulJobGroupPromote(u)) => {
+            let resp = serde_json::to_string(&u).unwrap();
+            Ok(Response::with((status::Ok, resp)))
         }
-    }
-
-    // Now that we've sorted all the projects into a HashMap keyed on origin, we can process them,
-    // one origin at a time. We do "core" first.
-    if let Some(core_projects) = origin_map.remove("core") {
-        let promote_result = do_group_promotion(&channel, core_projects, "core");
-        if !promote_result.is_ok() {
-            return promote_result;
-        }
-    }
-
-    for (origin, projects) in origin_map.iter() {
-        let promote_result = do_group_promotion(&channel, projects.to_vec(), &origin);
-        if !promote_result.is_ok() {
-            return promote_result;
-        }
-    }
-
-    if failed_projects.is_empty() {
-        Ok(Response::with(status::Ok))
-    } else {
-        let json = UnsuccessfulJobGroupPromote {
-            group_id: group.get_id(),
-            projects: failed_projects,
-        };
-        let resp = serde_json::to_string(&json).unwrap();
-
-        Ok(Response::with((status::Ok, resp)))
+        Err(_) => Ok(Response::with((status::InternalServerError, "rg:jgp:2"))),
     }
 }
 
@@ -506,7 +450,7 @@ pub fn project_delete(req: &mut Request) -> IronResult<Response> {
         (session_id, origin)
     };
 
-    if !check_origin_access(req, session_id, origin)? {
+    if !check_origin_access(session_id, origin)? {
         return Ok(Response::with(status::Forbidden));
     }
 
@@ -589,7 +533,7 @@ pub fn project_update(req: &mut Request) -> IronResult<Response> {
                 Ok(ref bytes) => {
                     match Plan::from_bytes(bytes) {
                         Ok(plan) => {
-                            if !check_origin_access(req, session_id, &origin)? {
+                            if !check_origin_access(session_id, &origin)? {
                                 return Ok(Response::with(status::Forbidden));
                             }
                             if plan.name != name {
@@ -666,47 +610,6 @@ pub fn project_jobs(req: &mut Request) -> IronResult<Response> {
     let mut conn = Broker::connect().unwrap();
     match conn.route::<ProjectJobsGet, ProjectJobsGetResponse>(&jobs_get) {
         Ok(jobs) => Ok(render_json(status::Ok, &jobs)),
-        Err(err) => Ok(render_net_error(&err)),
-    }
-}
-
-fn do_group_promotion(
-    channel: &str,
-    projects: Vec<&Project>,
-    origin: &str,
-) -> IronResult<Response> {
-    let mut conn = Broker::connect().unwrap();
-    let mut ocg = OriginChannelGet::new();
-    ocg.set_origin_name(origin.to_string());
-    ocg.set_name(channel.to_string());
-
-    let mut package_ids = Vec::new();
-
-    let channel = match conn.route::<OriginChannelGet, OriginChannel>(&ocg) {
-        Ok(c) => c,
-        Err(err) => return Ok(render_net_error(&err)),
-    };
-
-    for project in projects {
-        let opi = OriginPackageIdent::from_str(project.get_ident()).unwrap();
-        let mut opg = OriginPackageGet::new();
-        opg.set_ident(opi);
-
-        let op = match conn.route::<OriginPackageGet, OriginPackage>(&opg) {
-            Ok(o) => o,
-            Err(err) => return Ok(render_net_error(&err)),
-        };
-
-        package_ids.push(op.get_id());
-    }
-
-    let mut opgp = OriginPackageGroupPromote::new();
-    opgp.set_channel_id(channel.get_id());
-    opgp.set_package_ids(package_ids);
-    opgp.set_origin(origin.to_string());
-
-    match conn.route::<OriginPackageGroupPromote, NetOk>(&opgp) {
-        Ok(_) => Ok(Response::with(status::Ok)),
         Err(err) => Ok(render_net_error(&err)),
     }
 }

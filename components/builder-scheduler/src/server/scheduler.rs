@@ -20,7 +20,6 @@ use std::collections::HashMap;
 
 use hab_net::server::ZMQ_CONTEXT;
 use hab_net::routing::Broker;
-use hyper::status::StatusCode;
 use zmq;
 
 use protobuf::parse_from_bytes;
@@ -31,11 +30,10 @@ use data_store::DataStore;
 use error::{Result, Error};
 
 use config::Config;
+use bldr_core::api::{authenticate_with_auth_token, create_channel, promote_job_group_to_channel,
+                     promote_package_to_channel};
 use bldr_core::logger::Logger;
 use hab_core::channel::bldr_channel_name;
-use depot_client;
-use api_client;
-use {PRODUCT, VERSION};
 
 const SCHEDULER_ADDR: &'static str = "inproc://scheduler";
 const SOCKET_TIMEOUT_MS: i64 = 60_000;
@@ -71,7 +69,6 @@ pub struct ScheduleMgr {
     datastore: DataStore,
     socket: zmq::Socket,
     schedule_cli: ScheduleClient,
-    depot_url: String,
     auth_token: String,
     promote_channel: String,
     msg: zmq::Message,
@@ -89,11 +86,10 @@ impl ScheduleMgr {
         let mut schedule_cli = ScheduleClient::default();
         schedule_cli.connect()?;
 
-        let (log_path, depot_url, auth_token, promote_channel) = {
+        let (log_path, auth_token, promote_channel) = {
             let cfg = config.read().unwrap();
             (
                 PathBuf::from(cfg.log_path.clone()),
-                cfg.depot_url.clone(),
                 cfg.auth_token.clone(),
                 cfg.promote_channel.clone(),
             )
@@ -105,7 +101,6 @@ impl ScheduleMgr {
             datastore: datastore,
             socket: socket,
             schedule_cli: schedule_cli,
-            depot_url: depot_url,
             auth_token: auth_token,
             promote_channel: promote_channel,
             msg: msg,
@@ -449,36 +444,15 @@ impl ScheduleMgr {
     fn promote_package(&self, ident: &OriginPackageIdent, channel: &str) -> Result<()> {
         debug!("Promoting '{:?}' to '{}'", ident, channel);
 
-        // We re-create the depot client instead of caching and re-using it due to the
-        // connection getting dropped when it is attempted to be re-used. This _may_ be
-        // a known issue with hyper connection pool getting reset in some cases.
-        // TODO: Revisit this code when we upgrade hyper to 0.11.x (which will require
-        // significant changes)
-        let depot_cli = depot_client::Client::new(&self.depot_url, PRODUCT, VERSION, None).unwrap();
-
+        let session_id = authenticate_with_auth_token(&self.auth_token).map_err(
+            Error::BuilderCore,
+        )?;
         if channel != "stable" {
-            match depot_cli.create_channel(ident.get_origin(), channel, &self.auth_token) {
-                Ok(_) => (),
-                Err(depot_client::Error::APIError(StatusCode::Conflict, _)) => (),
-                Err(err) => {
-                    warn!("Failed to create '{}' channel: {:?}", channel, err);
-                    return Err(Error::ChannelCreate(err));
-                }
-            };
-        };
-
-        if let Some(err) = depot_cli
-            .promote_package(ident, channel, &self.auth_token)
-            .err()
-        {
-            warn!(
-                "Unable to promote package '{:?}' to channel '{}': {:?}",
-                ident,
-                channel,
-                err
-            );
-            return Err(Error::PackagePromote(err));
-        };
+            create_channel(ident.get_origin(), channel, session_id)
+                .map_err(Error::BuilderCore)?;
+        }
+        promote_package_to_channel(ident, channel, session_id)
+            .map_err(Error::BuilderCore)?;
 
         Ok(())
     }
@@ -486,11 +460,12 @@ impl ScheduleMgr {
     fn promote_group(&self, group: &proto::Group, channel: &str) -> Result<()> {
         debug!("Promoting group {} to {} channel", group.get_id(), channel);
 
-        let api_client = api_client::Client::new(&self.depot_url, PRODUCT, VERSION, None)
-            .map_err(Error::APIClient)?;
-        api_client
-            .job_group_promote(group.get_id(), channel, &self.auth_token)
-            .map_err(Error::APIClient)?;
+        let session_id = authenticate_with_auth_token(&self.auth_token).map_err(
+            Error::BuilderCore,
+        )?;
+
+        promote_job_group_to_channel(group.get_id(), channel, session_id)
+            .map_err(Error::BuilderCore)?;
 
         Ok(())
     }

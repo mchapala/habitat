@@ -17,6 +17,7 @@ use std::fmt;
 use std::io;
 use std::result;
 
+use bldr_core;
 use db;
 use hab_core;
 use hab_net;
@@ -32,6 +33,7 @@ use api_client;
 pub enum Error {
     APIClient(api_client::Error),
     BadPort(String),
+    BuilderCore(bldr_core::Error),
     ChannelCreate(depot_client::Error),
     Db(db::error::Error),
     DbPoolTimeout(r2d2::GetTimeout),
@@ -70,6 +72,7 @@ impl fmt::Display for Error {
         let msg = match *self {
             Error::APIClient(ref e) => format!("{}", e),
             Error::BadPort(ref e) => format!("{} is an invalid port. Valid range 1-65535.", e),
+            Error::BuilderCore(ref e) => format!("{}", e),
             Error::ChannelCreate(ref e) => format!("{}", e),
             Error::Db(ref e) => format!("{}", e),
             Error::DbPoolTimeout(ref e) => {
@@ -130,6 +133,7 @@ impl error::Error for Error {
         match *self {
             Error::APIClient(ref err) => err.description(),
             Error::BadPort(_) => "Received an invalid port or a number outside of the valid range.",
+            Error::BuilderCore(ref err) => err.description(),
             Error::ChannelCreate(ref err) => err.description(),
             Error::Db(ref err) => err.description(),
             Error::DbPoolTimeout(ref err) => err.description(),

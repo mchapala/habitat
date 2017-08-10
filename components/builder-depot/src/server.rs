@@ -211,44 +211,17 @@ pub fn origin_show(req: &mut Request) -> IronResult<Response> {
 pub fn get_origin<T: ToString>(origin: T) -> IronResult<Option<Origin>> {
     match bld_core::api::get_origin(origin) {
         Ok(o) => Ok(o),
-        Err(bld_core::Error::NetError(err)) => {
+        Err(err) => {
             let body = serde_json::to_string(&err).unwrap();
             let status = net_err_to_http(err.get_code());
             Err(IronError::new(err, (body, status)))
         }
-        Err(e) => {
-            let body = format!("{}", &e);
-            Err(IronError::new(e, (body, status::BadRequest)))
-        }
     }
-
-    // let mut conn = Broker::connect().unwrap();
-    // let mut request = OriginGet::new();
-    // request.set_name(origin.to_string());
-    // match conn.route::<OriginGet, Origin>(&request) {
-    //     Ok(origin) => Ok(Some(origin)),
-    //     Err(err) => {
-    //         if err.get_code() == ErrCode::ENTITY_NOT_FOUND {
-    //             Ok(None)
-    //         } else {
-    //             let body = serde_json::to_string(&err).unwrap();
-    //             let status = net_err_to_http(err.get_code());
-    //             Err(IronError::new(err, (body, status)))
-    //         }
-    //     }
-    // }
 }
 
-pub fn check_origin_access<T: ToString>(
-    req: &mut Request,
-    account_id: u64,
-    origin: T,
-) -> IronResult<bool> {
-    let mut request = CheckOriginAccessRequest::new();
-    request.set_account_id(account_id);
-    request.set_origin_name(origin.to_string());
-    match route_message::<CheckOriginAccessRequest, CheckOriginAccessResponse>(req, &request) {
-        Ok(response) => Ok(response.get_has_access()),
+pub fn check_origin_access<T: ToString>(account_id: u64, origin: T) -> IronResult<bool> {
+    match bld_core::api::check_origin_access(account_id, origin) {
+        Ok(b) => Ok(b),
         Err(err) => {
             let body = serde_json::to_string(&err).unwrap();
             let status = net_err_to_http(err.get_code());
@@ -326,7 +299,7 @@ pub fn invite_to_origin(req: &mut Request) -> IronResult<Response> {
         &user_to_invite,
         &origin
     );
-    if !check_origin_access(req, session.get_id(), &origin)? {
+    if !check_origin_access(session.get_id(), &origin)? {
         return Ok(Response::with(status::Forbidden));
     }
     let mut request = AccountGet::new();
@@ -381,7 +354,7 @@ pub fn list_origin_invitations(req: &mut Request) -> IronResult<Response> {
     }
 
     let mut conn = Broker::connect().unwrap();
-    if !check_origin_access(req, session_id, &origin_name)? {
+    if !check_origin_access(session_id, &origin_name)? {
         return Ok(Response::with(status::Forbidden));
     }
 
@@ -416,7 +389,7 @@ pub fn list_origin_members(req: &mut Request) -> IronResult<Response> {
 
     let mut conn = Broker::connect().unwrap();
 
-    if !check_origin_access(req, session_id, &origin_name)? {
+    if !check_origin_access(session_id, &origin_name)? {
         return Ok(Response::with(status::Forbidden));
     }
 
@@ -471,7 +444,7 @@ fn upload_origin_key(req: &mut Request) -> IronResult<Response> {
 
     let origin = match params.find("origin") {
         Some(origin) => {
-            if !check_origin_access(req, session.get_id(), origin)? {
+            if !check_origin_access(session.get_id(), origin)? {
                 return Ok(Response::with(status::Forbidden));
             }
             match get_origin(origin)? {
@@ -581,7 +554,7 @@ fn upload_origin_secret_key(req: &mut Request) -> IronResult<Response> {
 
     let origin = match params.find("origin") {
         Some(origin) => {
-            if !check_origin_access(req, session.get_id(), origin)? {
+            if !check_origin_access(session.get_id(), origin)? {
                 return Ok(Response::with(status::Forbidden));
             }
             match get_origin(origin)? {
@@ -675,7 +648,7 @@ fn upload_package(req: &mut Request) -> IronResult<Response> {
     // TODO: SA - Eliminate need to clone the session
     let session = req.extensions.get::<Authenticated>().unwrap().clone();
     if !depot.config.insecure {
-        if !check_origin_access(req, session.get_id(), &ident.get_origin())? {
+        if !check_origin_access(session.get_id(), &ident.get_origin())? {
             debug!(
                 "Failed origin access check, session: {}, ident: {}",
                 session.get_id(),
@@ -1503,7 +1476,7 @@ fn delete_channel(req: &mut Request) -> IronResult<Response> {
     match route_message::<OriginChannelGet, OriginChannel>(req, &channel_req) {
         Ok(origin_channel) => {
             // make sure the person trying to create the channel has access to do so
-            if !check_origin_access(req, session_id, &origin)? {
+            if !check_origin_access(session_id, &origin)? {
                 return Ok(Response::with(status::Forbidden));
             }
 
@@ -1794,7 +1767,7 @@ fn promote_package(req: &mut Request) -> IronResult<Response> {
         (channel, ident, session_id)
     };
 
-    do_promotion(req, ident, &channel, session_id)
+    do_promotion(&ident, &channel, session_id)
 }
 
 fn demote_package(req: &mut Request) -> IronResult<Response> {
@@ -1847,7 +1820,7 @@ fn demote_package(req: &mut Request) -> IronResult<Response> {
     channel_req.set_name(channel);
     match route_message::<OriginChannelGet, OriginChannel>(req, &channel_req) {
         Ok(origin_channel) => {
-            if !check_origin_access(req, session_id, &ident.get_origin())? {
+            if !check_origin_access(session_id, &ident.get_origin())? {
                 return Ok(Response::with(status::Forbidden));
             }
 
@@ -1936,82 +1909,35 @@ pub fn do_channel_creation(origin: &str, channel: &str, session_id: u64) -> Iron
         Ok(c) => c,
         Err(bld_core::Error::OriginNotFound(_)) => return Ok(Response::with(status::NotFound)),
         Err(bld_core::Error::NetError(e)) => return Ok(render_net_error(&e)),
+        Err(e) => {
+            error!("channel_create:1, err={:?}", &e);
+            return Ok(Response::with(status::InternalServerError));
+        }
     };
 
     Ok(render_json(status::Created, &origin_channel))
-    // let origin_id = match get_origin(origin)? {
-    //     Some(o) => o.get_id(),
-    //     None => {
-    //         debug!("Origin {} not found!", origin);
-    //         return Ok(Response::with(status::NotFound));
-    //     }
-    // };
-
-    // let mut conn = Broker::connect().unwrap();
-    // let mut request = OriginChannelCreate::new();
-
-    // request.set_owner_id(session_id);
-    // request.set_origin_name(origin.to_string());
-    // request.set_origin_id(origin_id);
-    // request.set_name(channel.to_string());
-
-    // match conn.route::<OriginChannelCreate, OriginChannel>(&request) {
-    //     Ok(origin_channel) => Ok(render_json(status::Created, &origin_channel)),
-    //     Err(err) => Ok(render_net_error(&err)),
-    // }
 }
 
 pub fn do_promotion(
-    req: &mut Request,
-    ident: OriginPackageIdent,
+    ident: &OriginPackageIdent,
     channel: &str,
     session_id: u64,
 ) -> IronResult<Response> {
-    let mut channel_req = OriginChannelGet::new();
-    channel_req.set_origin_name(ident.get_origin().to_string());
-    channel_req.set_name(channel.to_string());
-
-    match route_message::<OriginChannelGet, OriginChannel>(req, &channel_req) {
-        Ok(origin_channel) => {
-            if !check_origin_access(req, session_id, &ident.get_origin())? {
-                return Ok(Response::with(status::Forbidden));
-            }
-
-            let mut request = OriginPackageGet::new();
-            request.set_ident(ident.clone());
-            match route_message::<OriginPackageGet, OriginPackage>(req, &request) {
-                Ok(package) => {
-                    let mut promote = OriginPackagePromote::new();
-                    promote.set_channel_id(origin_channel.get_id());
-                    promote.set_package_id(package.get_id());
-                    promote.set_ident(ident);
-                    match route_message::<OriginPackagePromote, NetOk>(req, &promote) {
-                        Ok(_) => Ok(Response::with(status::Ok)),
-                        Err(err) => {
-                            error!("promote:1, err={:?}", err);
-                            Ok(render_net_error(&err))
-                        }
-                    }
-                }
-                Err(err) => {
-                    match err.get_code() {
-                        ErrCode::ENTITY_NOT_FOUND => Ok(Response::with((status::NotFound))),
-                        _ => {
-                            error!("promote:2, err={:?}", err);
-                            Ok(Response::with(status::InternalServerError))
-                        }
-                    }
+    match bld_core::api::promote_package_to_channel(ident, channel, session_id) {
+        Ok(_) => Ok(Response::with(status::Ok)),
+        Err(bld_core::Error::OriginAccessDenied) => Ok(Response::with(status::Forbidden)),
+        Err(bld_core::Error::NetError(err)) => {
+            match err.get_code() {
+                ErrCode::ENTITY_NOT_FOUND => Ok(Response::with(status::NotFound)),
+                _ => {
+                    error!("promote:1, err={:?}", &err);
+                    Ok(render_net_error(&err))
                 }
             }
         }
-        Err(err) => {
-            match err.get_code() {
-                ErrCode::ENTITY_NOT_FOUND => Ok(Response::with((status::NotFound))),
-                _ => {
-                    error!("promote:3, err={:?}", err);
-                    Ok(Response::with(status::InternalServerError))
-                }
-            }
+        Err(e) => {
+            error!("promote:2, err={:?}", &e);
+            Ok(Response::with(status::InternalServerError))
         }
     }
 }

@@ -18,10 +18,15 @@ use std::result;
 
 use protocol::net;
 
+use data_structures;
+
 #[derive(Debug)]
 pub enum Error {
+    GroupNotComplete,
     NetError(net::NetError),
+    OriginAccessDenied,
     OriginNotFound(String),
+    UnsuccessfulJobGroupPromote(data_structures::UnsuccessfulJobGroupPromote),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -29,8 +34,13 @@ pub type Result<T> = result::Result<T, Error>;
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let msg = match *self {
+            Error::GroupNotComplete => format!("This group is not complete"),
             Error::NetError(ref e) => format!("{}", e),
+            Error::OriginAccessDenied => format!("You don't have access to this origin"),
             Error::OriginNotFound(ref e) => format!("Origin {} was not found", e),
+            Error::UnsuccessfulJobGroupPromote(_) => {
+                format!("Some projects failed to promote to the specified channel")
+            }
         };
         write!(f, "{}", msg)
     }
@@ -39,8 +49,11 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
+            Error::GroupNotComplete => "Group not complete",
             Error::NetError(ref err) => err.description(),
+            Error::OriginAccessDenied => "Origin access denied",
             Error::OriginNotFound(_) => "Origin not found",
+            Error::UnsuccessfulJobGroupPromote(_) => "Some projects failed to promote",
         }
     }
 }
